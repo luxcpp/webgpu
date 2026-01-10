@@ -31,14 +31,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout core headers
-        uses: actions/checkout@v4
-        with:
-          repository: luxcpp/gpu
-          path: gpu-core
-          sparse-checkout: include
-          token: ${{ secrets.LUXCPP_PAT }}
-
       - name: Checkout gpu.cpp
         uses: actions/checkout@v4
         with:
@@ -65,14 +57,22 @@ jobs:
           unzip wgpu.zip -d wgpu
         shell: bash
 
-      - name: Configure
+      - name: Configure (Unix)
+        if: runner.os != 'Windows'
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DLUX_GPU_INCLUDE_DIR=${{ github.workspace }}/gpu-core/include \
             -DGPUCPP_DIR=${{ github.workspace }}/third_party/gpu.cpp \
             -DCMAKE_PREFIX_PATH=${{ github.workspace }}/wgpu
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
         shell: bash
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGPUCPP_DIR=${{ github.workspace }}/third_party/gpu.cpp \
+            -DCMAKE_PREFIX_PATH=${{ github.workspace }}/wgpu
 
       - name: Build
         run: cmake --build build --target luxgpu_backend_webgpu
