@@ -1,4 +1,28 @@
-# Lux WebGPU Backend
+# Lux WebGPU Backend — **ARCHIVED, moved to lux-private/gpu-kernels**
+
+> **This repository has moved.** The WebGPU backend plugin source +
+> WGSL shaders now live in
+> [`lux-private/gpu-kernels`](https://github.com/lux-private/gpu-kernels)
+> at `webgpu/` and `kernels/{domain}/[primitive/]wgsl/`. History was
+> migrated via `git filter-repo --to-subdirectory-filter webgpu/` and
+> merged with `--allow-unrelated-histories`, so every commit here is
+> preserved over there at the same SHA's filtered counterpart.
+>
+> The public C ABI (`<lux/gpu.h>`) and the plugin loader continue to
+> live in [`luxcpp/gpu`](https://github.com/luxcpp/gpu). At runtime
+> luxcpp/gpu still dlopens `libluxgpu_backend_webgpu.dylib` from
+> `/usr/local/lib/lux-gpu/` — the install layout and ABI are unchanged.
+>
+> For development, build the plugin via the new home:
+>
+> ```bash
+> cd ~/work/lux-private/gpu-kernels
+> cmake -B build -DLUX_GPU_KERNELS_BUILD_METAL=OFF
+> cmake --build build -j$(nproc)
+> # Plugin lands at build/webgpu_backend/libluxgpu_backend_webgpu.{so,dylib}
+> ```
+
+---
 
 Cross-platform GPU compute acceleration via WebGPU (Dawn/wgpu-native).
 
