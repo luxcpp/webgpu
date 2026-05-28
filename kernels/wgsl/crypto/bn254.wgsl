@@ -821,3 +821,67 @@ fn bn254_g1_batch_eq(
     result.z.limbs[0] = select(0u, 1u, eq);
     output_points[i1] = result;
 }
+
+// =============================================================================
+// LuxBackend ABI bridges — operate directly on G1Projective buffers.
+//
+// Byte layout matches LuxG1Projective254 (3 × 4 × u64 = 96 bytes per point):
+// the host writes 4×u64 limbs little-endian per coord; on a little-endian
+// device this maps lane-for-lane onto WGSL's `Fp { limbs: array<u32, 8> }`
+// (8 × u32 = 32 bytes, same bit pattern). All values are Montgomery-form,
+// consistent with the metal/cpu reference impls.
+//
+// Bindings extend the existing group-0 set so all entries share one bind
+// group layout:
+//   binding(1)  : input_scalars   (declared above, reused by proj_scalar_mul)
+//   binding(2)  : output_points   (declared above, written by both new kernels)
+//   binding(3)  : num_elements    (declared above, count uniform)
+//   binding(4)  : proj_a          (new — projective input A)
+//   binding(5)  : proj_b          (new — projective input B, add only)
+// =============================================================================
+
+@group(0) @binding(4) var<storage, read> proj_a: array<G1Projective>;
+@group(0) @binding(5) var<storage, read> proj_b: array<G1Projective>;
+
+// Projective + Projective addition (both inputs Jacobian, output Jacobian).
+// Uses the same add-2008-bbjlp formula as g1_add (declared above).
+@compute @workgroup_size(64)
+fn bn254_g1_proj_batch_add(
+    @builtin(global_invocation_id) gid: vec3<u32>
+) {
+    let idx = gid.x;
+    if (idx >= num_elements) { return; }
+    let pa = proj_a[idx];
+    let pb = proj_b[idx];
+    output_points[idx] = g1_add(pa, pb);
+}
+
+// Projective scalar multiplication. Double-and-add, MSB-to-LSB so that the
+// scalar=0 short-circuit (no doublings happen on `result = identity`) yields
+// the canonical point at infinity (z = 0). Reads scalars from binding(1)
+// (input_scalars) — shared with the existing mixed-mode batch_scalar_mul.
+@compute @workgroup_size(64)
+fn bn254_g1_proj_batch_scalar_mul(
+    @builtin(global_invocation_id) gid: vec3<u32>
+) {
+    let idx = gid.x;
+    if (idx >= num_elements) { return; }
+
+    let base = proj_a[idx];
+    let s    = input_scalars[idx];
+    var result = g1_identity();
+
+    // MSB → LSB. 256 bits total.
+    for (var bit: i32 = 255; bit >= 0; bit = bit - 1) {
+        result = g1_double(result);
+        let bit_u = u32(bit);
+        let limb_idx = bit_u / 32u;
+        let bit_in_limb = bit_u % 32u;
+        let b = (s.limbs[limb_idx] >> bit_in_limb) & 1u;
+        if (b == 1u) {
+            result = g1_add(result, base);
+        }
+    }
+
+    output_points[idx] = result;
+}

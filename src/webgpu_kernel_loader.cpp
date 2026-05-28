@@ -112,7 +112,7 @@ public:
         wgsl_desc.code.length = source_len > 0 ? source_len : WGPU_STRLEN;
 
         WGPUShaderModuleDescriptor shader_desc = {};
-        shader_desc.nextInChain = reinterpret_cast<WGPUChainedStruct const*>(&wgsl_desc);
+        shader_desc.nextInChain = reinterpret_cast<WGPUChainedStruct*>(&wgsl_desc);
 
         WGPUShaderModule module = wgpuDeviceCreateShaderModule(device, &shader_desc);
         if (!module) {

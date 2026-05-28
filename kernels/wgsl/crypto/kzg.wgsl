@@ -971,3 +971,45 @@ fn copy_coeffs(
 
     result_coeffs[idx] = poly_coeffs[idx];
 }
+
+// =============================================================================
+// Canonicalize BLS12-381 G1 Jacobian projective → (x_aff, y_aff, R mod p).
+//
+// Mirrors bn254_g1_normalize_projective in luxcpp/metal/src/shaders/crypto/
+// bn254.metal and bls12_381_g1_normalize_projective in the same directory.
+// Cross-backend consensus depends on the post-MSM projective representation
+// being the UNIQUE affine-as-projective form for every curve point.
+//
+// Layout: G1Projective uses Fp384 (six vec2<u32> pairs per coord) — same as
+// LuxG1Projective381 (3 × 6 × u64 = 144 bytes). Identity → all-zero limbs.
+//
+// PRECONDITION: the bucket-method MSM kernels above MUST be replaced with a
+// real Pippenger before this normalize is dispatched — at present they are
+// placeholders (see comments around `msm_bucket_accumulate`). Until that
+// happens the WebGPU plugin returns NOT_SUPPORTED from op_msm, so this kernel
+// is reachable only via the kernel loader's syntax check.
+//
+// The kernel body uses a placeholder fp384_inv hook that is not yet defined
+// in this file. When the WGSL fp384 Montgomery arithmetic is implemented
+// (issue: requires schoolbook 12×u32 mul + 12-limb Montgomery reduction with
+// canonical three-way split-add carry — see fp256_mont_mul in bn254.metal
+// for the reference shape), uncomment the body and remove the early return.
+// =============================================================================
+@compute @workgroup_size(256)
+fn bls12_381_g1_normalize_projective(
+    @builtin(global_invocation_id) global_id: vec3<u32>
+) {
+    let idx = global_id.x;
+    if idx >= params.num_points { return; }
+
+    // The msm_buckets[0] slot holds the post-reduction Jacobian point.
+    // When real fp384 arithmetic lands here, normalize as in Metal/CUDA:
+    //   if z == 0: write (0, 0, 0)
+    //   else:      z_inv = fp384_inv(z); write (x*z_inv², y*z_inv³, R mod p)
+    //
+    // Until then: leave the slot untouched. The host bridge returns
+    // NOT_SUPPORTED for op_msm so this is unreachable at runtime; the
+    // kernel exists so the loader can validate the shape and the host
+    // dispatcher can include it in the three-pass plan once MSM is real.
+    let _placeholder = msm_buckets[idx];
+}

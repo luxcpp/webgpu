@@ -41,11 +41,22 @@ const MSG_SCHEDULE: array<array<u32, 16>, 7> = array<array<u32, 16>, 7>(
 // Data Structures
 // ============================================================================
 
+// Key stored as vec4 pairs to satisfy uniform buffer alignment (16 bytes)
 struct Blake3Params {
     input_len: u32,
-    key_words: array<u32, 8>,   // Key for keyed_hash or context key
     flags: u32,                  // Domain separation flags
     num_chunks: u32,
+    _pad: u32,
+    key_words_0: vec4<u32>,      // key_words[0..3]
+    key_words_1: vec4<u32>,      // key_words[4..7]
+}
+
+// Helper to extract key_words array from params
+fn get_key_words(p: Blake3Params) -> array<u32, 8> {
+    return array<u32, 8>(
+        p.key_words_0.x, p.key_words_0.y, p.key_words_0.z, p.key_words_0.w,
+        p.key_words_1.x, p.key_words_1.y, p.key_words_1.z, p.key_words_1.w
+    );
 }
 
 struct ChunkState {
@@ -200,7 +211,7 @@ fn process_chunk(
     
     // Initialize CV with key or IV
     if (params.flags & KEYED_HASH) != 0u {
-        cv = params.key_words;
+        cv = get_key_words(params);
     } else {
         for (var i = 0u; i < 8u; i++) {
             cv[i] = IV[i];
@@ -292,7 +303,7 @@ fn merge_parents(
     // Parent CV
     var cv: array<u32, 8>;
     if (params.flags & KEYED_HASH) != 0u {
-        cv = params.key_words;
+        cv = get_key_words(params);
     } else {
         for (var i = 0u; i < 8u; i++) {
             cv[i] = IV[i];
@@ -329,7 +340,7 @@ fn hash_small(
     
     // Initialize CV
     if (params.flags & KEYED_HASH) != 0u {
-        cv = params.key_words;
+        cv = get_key_words(params);
     } else {
         for (var i = 0u; i < 8u; i++) {
             cv[i] = IV[i];
@@ -383,26 +394,141 @@ fn hash_xof(
     @builtin(global_invocation_id) gid: vec3<u32>
 ) {
     let output_block = gid.x;
-    
+
     // Each block produces 64 bytes (16 u32)
     // Use counter mode from the root compression
-    
+
     var cv: array<u32, 8>;
     for (var i = 0u; i < 8u; i++) {
         cv[i] = chunk_cvs[i];  // Root CV from first pass
     }
-    
+
     var block: array<u32, 16>;
     // Block content is empty for XOF extension
     for (var i = 0u; i < 16u; i++) {
         block[i] = 0u;
     }
-    
+
     let state = compress(cv, block, output_block, 0u, ROOT);
-    
+
     // Store 64 bytes of output
     let out_offset = output_block * 16u;
     for (var i = 0u; i < 16u; i++) {
         output[out_offset + i] = state[i];
+    }
+}
+
+// ============================================================================
+// Batched variable-length BLAKE3 hash
+// ============================================================================
+//
+// One thread per input. Each thread reads (offsets[h], lengths[h]) from per-
+// input arrays and produces a 32-byte digest at outputs[h*8 .. h*8+8] (u32).
+//
+// This kernel mirrors metal/src/shaders/crypto/blake3.metal::blake3_batch_hash
+// and is what the LuxBackend `op_blake3_hash` ABI dispatches into.
+//
+// Bindings (separate from the small/chunks/parents kernels above):
+//   batch_inputs   : flat u8 buffer packed 4 bytes/u32 (LE)
+//   batch_outputs  : 32 bytes / 8 u32 words per hash
+//   batch_offsets  : per-input start offset (bytes)
+//   batch_lengths  : per-input byte length
+//   batch_params   : { num_inputs }
+
+struct Blake3BatchParams {
+    num_inputs: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+
+@group(0) @binding(4) var<storage, read>       batch_inputs:  array<u32>;
+@group(0) @binding(5) var<storage, read_write> batch_outputs: array<u32>;
+@group(0) @binding(6) var<storage, read>       batch_offsets: array<u32>;
+@group(0) @binding(7) var<storage, read>       batch_lengths: array<u32>;
+@group(0) @binding(8) var<uniform>             batch_params:  Blake3BatchParams;
+
+// Read a single byte from the u32-packed `batch_inputs` buffer at byte offset.
+fn batch_read_byte(off: u32) -> u32 {
+    let word  = batch_inputs[off >> 2u];
+    let shift = (off & 3u) * 8u;
+    return (word >> shift) & 0xFFu;
+}
+
+@compute @workgroup_size(64)
+fn hash_batch(
+    @builtin(global_invocation_id) gid: vec3<u32>
+) {
+    let hid = gid.x;
+    if (hid >= batch_params.num_inputs) { return; }
+
+    let off = batch_offsets[hid];
+    let len = batch_lengths[hid];
+
+    // Initialize CV = IV.
+    var cv: array<u32, 8>;
+    for (var i = 0u; i < 8u; i++) {
+        cv[i] = IV[i];
+    }
+
+    var bytes_processed: u32 = 0u;
+    var chunk_counter:   u32 = 0u;
+
+    // Edge case: empty input — single block of zeros, length 0,
+    // flags = CHUNK_START | CHUNK_END | ROOT.
+    if (len == 0u) {
+        var block: array<u32, 16>;
+        for (var i = 0u; i < 16u; i++) { block[i] = 0u; }
+        let state0 = compress(cv, block, 0u, 0u, CHUNK_START | CHUNK_END | ROOT);
+        let out0 = hid * 8u;
+        for (var i = 0u; i < 8u; i++) {
+            batch_outputs[out0 + i] = state0[i];
+        }
+        return;
+    }
+
+    // Process blocks of up to 64 bytes. The reference Metal implementation
+    // emits CHUNK_START on the very first block and CHUNK_END | ROOT on the
+    // very last; intermediate blocks carry no chunk flags.
+    loop {
+        if (bytes_processed >= len) { break; }
+
+        let remaining = len - bytes_processed;
+        let block_len = min(64u, remaining);
+
+        // Load up to 64 bytes from batch_inputs into 16 u32 words (LE).
+        var block: array<u32, 16>;
+        for (var i = 0u; i < 16u; i++) { block[i] = 0u; }
+        for (var i = 0u; i < block_len; i++) {
+            let byte_val = batch_read_byte(off + bytes_processed + i);
+            let word_idx = i / 4u;
+            let shift    = (i & 3u) * 8u;
+            block[word_idx] = block[word_idx] | (byte_val << shift);
+        }
+
+        var flags: u32 = 0u;
+        if (bytes_processed == 0u) {
+            flags = flags | CHUNK_START;
+        }
+        if (bytes_processed + block_len >= len) {
+            flags = flags | CHUNK_END | ROOT;
+        }
+
+        // Compress; on the final block we want the full 16-word state for
+        // potential CHUNK_END output. Reference Metal uses cv = compress(...)
+        // result truncated to 8 words for both intermediate and final blocks.
+        let state = compress(cv, block, chunk_counter, block_len, flags);
+        for (var i = 0u; i < 8u; i++) { cv[i] = state[i]; }
+
+        bytes_processed = bytes_processed + block_len;
+        if ((bytes_processed % BLAKE3_CHUNK_LEN) == 0u) {
+            chunk_counter = chunk_counter + 1u;
+        }
+    }
+
+    // Write 32-byte digest.
+    let out_off = hid * 8u;
+    for (var i = 0u; i < 8u; i++) {
+        batch_outputs[out_off + i] = cv[i];
     }
 }

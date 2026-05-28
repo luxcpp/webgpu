@@ -136,7 +136,7 @@ fn softmax(
 // In-place Softmax
 // ============================================================================
 
-@group(0) @binding(4) var<storage, read_write> inout: array<f32>;
+@group(0) @binding(4) var<storage, read_write> data_inout: array<f32>;
 
 @compute @workgroup_size(256)
 fn softmax_inplace(
@@ -159,7 +159,7 @@ fn softmax_inplace(
 
     var i = lid.x;
     while (i < dim) {
-        local_max = max(local_max, inout[base_idx + i] / temperature);
+        local_max = max(local_max, data_inout[base_idx + i] / temperature);
         i += WORKGROUP_SIZE;
     }
 
@@ -182,8 +182,8 @@ fn softmax_inplace(
     i = lid.x;
     while (i < dim) {
         let idx = base_idx + i;
-        let exp_val = safe_exp(inout[idx] / temperature - max_val);
-        inout[idx] = exp_val;  // Store exp temporarily
+        let exp_val = safe_exp(data_inout[idx] / temperature - max_val);
+        data_inout[idx] = exp_val;  // Store exp temporarily
         local_sum += exp_val;
         i += WORKGROUP_SIZE;
     }
@@ -205,7 +205,7 @@ fn softmax_inplace(
     i = lid.x;
     while (i < dim) {
         let idx = base_idx + i;
-        inout[idx] = inout[idx] * inv_sum;
+        data_inout[idx] = data_inout[idx] * inv_sum;
         i += WORKGROUP_SIZE;
     }
 }

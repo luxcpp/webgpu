@@ -21,6 +21,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Enable CTest
+include(CTest)
+enable_testing()
+
 # =============================================================================
 # Options
 # =============================================================================
@@ -118,6 +122,24 @@ if(LUX_WEBGPU_EMBED_KERNELS)
     file(APPEND ${EMBEDDED_KERNELS_HEADER} "} // namespace lux::gpu::wgsl\n")
 endif()
 
+# Core ABI headers — canonical location is luxcpp/gpu/include
+if(DEFINED LUX_GPU_INCLUDE_DIR)
+    set(LUX_ABI_INCLUDE ${LUX_GPU_INCLUDE_DIR})
+else()
+    find_path(LUX_ABI_INCLUDE lux/gpu.h
+        PATHS
+            ${CMAKE_CURRENT_SOURCE_DIR}/../gpu/include
+            /usr/local/include
+            /usr/include
+    )
+endif()
+
+if(NOT LUX_ABI_INCLUDE)
+    message(FATAL_ERROR "Could not find lux/gpu.h - set LUX_GPU_INCLUDE_DIR or place ../gpu/include alongside")
+endif()
+
+message(STATUS "Using ABI headers from: ${LUX_ABI_INCLUDE}")
+
 # =============================================================================
 # Backend Plugin Library
 # =============================================================================
@@ -128,8 +150,9 @@ add_library(luxgpu_backend_webgpu MODULE
 )
 
 target_include_directories(luxgpu_backend_webgpu PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${LUX_ABI_INCLUDE}
     ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../gpu/src  # cpu_fhe_helpers.hpp
 )
 
 target_compile_definitions(luxgpu_backend_webgpu PRIVATE
@@ -141,6 +164,24 @@ target_link_libraries(luxgpu_backend_webgpu PRIVATE
     ${WEBGPU_LIB}
     gpucpp
 )
+
+# R-5: link BLAKE3 for content-keyed pipeline cache (collision-resistant)
+# Default to the sibling crypto build; override via -DLUX_CRYPTO_BUILD_DIR.
+if(NOT DEFINED LUX_CRYPTO_BUILD_DIR)
+    set(LUX_CRYPTO_BUILD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../crypto/build)
+endif()
+set(_lux_blake3_cabi ${LUX_CRYPTO_BUILD_DIR}/blake3/libblake3.a)
+set(_lux_blake3_cpu  ${LUX_CRYPTO_BUILD_DIR}/blake3/libblake3_cpu.a)
+if(EXISTS ${_lux_blake3_cabi} AND EXISTS ${_lux_blake3_cpu})
+    target_link_libraries(luxgpu_backend_webgpu PRIVATE
+        ${_lux_blake3_cabi}
+        ${_lux_blake3_cpu}
+    )
+    target_compile_definitions(luxgpu_backend_webgpu PRIVATE LUX_GPU_WEBGPU_HAVE_BLAKE3=1)
+    message(STATUS "WebGPU: linking BLAKE3 for pipeline cache key")
+else()
+    message(STATUS "WebGPU: BLAKE3 not found, pipeline cache falls back to std::hash")
+endif()
 
 set_target_properties(luxgpu_backend_webgpu PROPERTIES
     OUTPUT_NAME "luxgpu_backend_webgpu"
@@ -176,6 +217,14 @@ if(NOT LUX_WEBGPU_EMBED_KERNELS)
 endif()
 
 # =============================================================================
+# Tests
+# =============================================================================
+
+if(LUX_WEBGPU_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()
+
+# =============================================================================
 # Summary
 # =============================================================================
 
@@ -185,4 +234,5 @@ message(STATUS "  Version: ${PROJECT_VERSION}")
 message(STATUS "  WGSL Kernels: ${WGSL_KERNEL_COUNT}")
 message(STATUS "  Embed Kernels: ${LUX_WEBGPU_EMBED_KERNELS}")
 message(STATUS "  WebGPU Implementation: ${WEBGPU_DEFINES}")
+message(STATUS "  Build Tests: ${LUX_WEBGPU_BUILD_TESTS}")
 message(STATUS "")
